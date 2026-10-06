@@ -20,7 +20,7 @@ KEY DESIGN DECISIONS
      + works with free tools, and files are easy to inspect and replay
      - latency is "seconds to minutes", not sub-second true streaming
    In production with a cloud Kafka (MSK/Confluent), Databricks would read the
-   topic directly with Structured Streaming. Say this in interviews.
+   topic directly with Structured Streaming.
 
 2. DELIVERY GUARANTEE: AT-LEAST-ONCE, then dedupe downstream.
    Order of operations on every flush:

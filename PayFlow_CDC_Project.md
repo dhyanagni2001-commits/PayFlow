@@ -17,13 +17,9 @@
 5. [Data model](#5-data-model)
 6. [Repository layout](#6-repository-layout)
 7. [Build guide, phase by phase](#7-build-guide-phase-by-phase)
-8. [Measuring your resume numbers](#8-measuring-your-resume-numbers)
-9. [Resume bullets](#9-resume-bullets)
-10. [Interview prep](#10-interview-prep)
-11. [Honest limitations](#11-honest-limitations)
-12. [Timeline](#12-timeline)
-13. [All design decisions in one table](#13-all-design-decisions-in-one-table)
-14. [Appendix: full source code, file by file](#appendix-full-source-code-file-by-file)
+8. [Honest limitations](#8-honest-limitations)
+9. [All design decisions in one table](#9-all-design-decisions-in-one-table)
+10. [Appendix: full source code, file by file](#appendix-full-source-code-file-by-file)
 
 ---
 
@@ -41,7 +37,7 @@ PayFlow is a (fictional) payment processor. Online merchants use it to accept ca
 
 ## 2. Success criteria
 
-These are the targets. Section 8 explains how to measure each one. **Your resume uses the measured value, never the target.**
+These are the targets. The measured values are in the README's results table.
 
 | Area | Target | How it's proven |
 |---|---|---|
@@ -104,9 +100,9 @@ flowchart LR
 
 | Layer | Tool | Why this one | Alternative rejected, and why | What we give up |
 |---|---|---|---|---|
-| Source DB | **PostgreSQL 16** | Most common OLTP DB in job posts; built-in logical decoding (`pgoutput`), no extensions | MySQL: also fine, but Postgres CDC concepts (slots, LSN, publications) are richer to talk about | None significant |
+| Source DB | **PostgreSQL 16** | Widely used open-source OLTP database; built-in logical decoding (`pgoutput`), no extensions | MySQL: also fine, but Postgres CDC concepts (slots, LSN, publications) are more explicit | None significant |
 | Change capture | **Debezium 2.7** (Kafka Connect) | Industry standard log-based CDC; reads WAL, so it sees deletes and every intermediate state with zero query load | Polling `updated_at`: misses deletes and intermediate states, and adds load | More moving parts; a stuck slot can fill the source disk (we monitor it) |
-| Event log | **Apache Kafka 3.9 (KRaft)** | Durable, replayable, ordered per key; what most DE job posts list. KRaft means no ZooKeeper container | Redpanda: lighter, but less recognizable on a resume (easy swap if RAM is tight) | Single broker = no replication. Fine locally, never in prod |
+| Event log | **Apache Kafka 3.9 (KRaft)** | Durable, replayable, ordered per key; the de facto standard event log. KRaft means no ZooKeeper container | Redpanda: lighter, Kafka-compatible (easy swap if RAM is tight), but less widely deployed | Single broker = no replication. Fine locally, never in prod |
 | Message format | **JSON, no Schema Registry** | Human-readable in Kafka UI, one less container | Avro + Schema Registry: enforced contracts, smaller messages. Right choice with multiple consuming teams | No enforced producer/consumer contract (we detect drift downstream instead) |
 | Landing | **Python consumer → Parquet** | Databricks Free Edition (serverless, cloud) can't reach Kafka on a laptop. Files bridge the gap | Databricks reading Kafka directly: the production answer with a cloud Kafka (MSK/Confluent) | Minutes of latency instead of seconds |
 | Lakehouse | **Databricks Free Edition** + Delta Lake | Free forever (no 30-day clock like the Snowflake trial). Delta gives ACID MERGE, time travel, OPTIMIZE | Snowflake: great, but the trial expires and the project stops working after a month | Serverless only, daily compute quota, one 2X-Small SQL warehouse, max 5 concurrent job tasks |
@@ -431,122 +427,20 @@ FROM payflow.gold.daily_merchant_settlement GROUP BY currency;
 
 ---
 
-## 8. Measuring your resume numbers
-
-**Rule: only numbers you measured go on the resume.** Record each in a "Results" table in the README with the date and machine.
-
-| # | Metric | How to measure | Where it shows | Typical resume phrasing |
-|---|---|---|---|---|
-| 1 | Total change events processed | `SELECT COUNT(*) FROM payflow.bronze.cdc_events` (let the simulator run for a few days at `--rate 20`) | bronze | "[X]M row-level changes" |
-| 2 | Dollars processed | `SELECT SUM(amount_cents)/100 FROM payflow.silver.payments` | silver | "$[X]M in simulated payments" |
-| 3 | Sustained throughput | `make bench`: highest rate where `lag@settle` stays near 0 | console | "[X] events/sec sustained" |
-| 4 | Capture latency p50/p95 | `make check`, latency block (commit → Parquet) | console | "p95 commit-to-landing latency of [X]s" |
-| 5 | End-to-end freshness | `SELECT AVG(latency_p95_s) FROM payflow.ops.pipeline_runs` | ops | "p95 source-to-lakehouse freshness of [X] min" |
-| 6 | Zero loss under failure | `run_chaos.sh` × 4 scenarios × 3 runs, `verify_no_loss` | chaos_logs | "0 lost rows across [N] fault-injection runs" |
-| 7 | Duplicates removed | `crash_before_commit`: dup_in_bronze vs dup_in_silver | Databricks SQL | "deduplicated [X] redelivered events to 0" |
-| 8 | Debezium outage recovery | `stop_connect` summary: WAL held, catch-up seconds | chaos_logs | "recovered from a 60s capture outage in [X]s with 0 loss" |
-| 9 | Reconciliation | `SELECT COUNT(*), SUM(mismatches) FROM payflow.ops.reconciliation_runs WHERE mode='daily'` | ops | "reconciled [N] days to the cent with 0 mismatches" |
-| 10 | DQ catch rate | latest row of `payflow.ops.dq_catch_rate_history` (caught / injected, false positives) | ops | "caught [X]% of [N] injected bad records, [Y] false positives" |
-| 11 | Small-file compaction | `payflow.ops.maintenance_runs` (files_before → files_after) + time a query before/after | ops | "cut file count [X]→[Y], speeding queries [Z]%" |
-| 12 | SCD2 history | `SELECT COUNT(*) FROM payflow.gold.dim_merchant_scd2 WHERE NOT is_current` | gold | "tracked [X] merchant pricing/risk changes" |
-| 13 | Tests | `pytest --collect-only -q | tail -1` | console | "[N] automated tests incl. end-to-end CDC in CI" |
-| 14 | Replay determinism | totals before/after `payflow_replay` | Databricks SQL | "bit-identical gold totals after full replay" |
-
-**Sanity ranges** (if you're far off, something is wrong, investigate before reporting): capture p50 is roughly half the consumer's `--flush-seconds`; end-to-end freshness is dominated by the 30-minute schedule; DQ false positives should be 0 because the simulator's clean data never violates the rules; reconciliation mismatches on closed days should be 0.
-
----
-
-## 9. Resume bullets
-
-Replace every `[X]` with **your measured value**. Delete a bullet rather than guess a number.
-
-**Project line:**
-`PayFlow: Real-Time Payments CDC Lakehouse | Debezium, Kafka, Databricks, Delta Lake, PySpark, Airflow, Tableau`
-
-**Bullets (pick 2-3):**
-
-- Built a change data capture pipeline streaming **[X]M** Postgres row changes (inserts, updates, deletes) through Debezium and Kafka into a Databricks Delta Lake medallion architecture, orchestrated with Airflow and served in Tableau.
-- Guaranteed zero data loss with at-least-once delivery, Kafka-offset deduplication, and LSN-ordered Delta MERGEs with delete tombstones; **[N]** fault-injection runs (consumer kills, Debezium outage, schema drift) ended with **0** lost and **0** duplicate rows.
-- Reconciled the lakehouse to the source database to the cent across **[N]** days and **$[X]M** of simulated payments, and built an SCD Type 2 merchant dimension for point-in-time fee calculation in daily settlements.
-- Wrote data quality rules that caught **[X]%** of **[N]** injected bad records with **[Y]** false positives, and sustained **[X]** events/sec with p95 commit-to-landing latency of **[Y]s** on a single-node stack.
-
-**Short version (ML/SDE resumes, 2 bullets):**
-
-- Built a Debezium + Kafka CDC pipeline into Databricks Delta Lake (Airflow, Tableau) processing **[X]M** row changes with **0** lost or duplicate rows across **[N]** fault-injection tests.
-- Reconciled to the source database to the cent across **[N]** days; data quality rules caught **[X]%** of injected bad records with **[Y]** false positives.
-
----
-
-## 10. Interview prep
-
-**Why CDC instead of a nightly batch export?**
-Batch only sees the state at export time. CDC sees every change: deletes (polling can't, the row is gone), intermediate states (authorized before captured), and exact change times. It also puts no query load on the source, since it reads the WAL.
-
-**Is it exactly-once?**
-No, and I didn't claim it. The consumer is at-least-once: it writes the file, then commits the Kafka offset, so a crash re-delivers events. Each event carries `(topic, partition, offset)`, a unique id, and silver dedupes on it, so the *result* is exactly-once. Kafka transactions only give true exactly-once when the sink is also Kafka. I proved it with a fault hook that crashes in exactly that window.
-
-**What if events arrive out of order?**
-Per row they can't from Kafka (keyed by primary key, one partition). They can after a replay or redelivery. So the silver MERGE only applies an event if its WAL LSN (tie-break: offset) is newer than the stored row. I don't use `updated_at` for ordering because two updates in one millisecond or a clock change would break it.
-
-**How do you handle deletes?**
-As tombstones. A hard delete loses the LSN, so an old redelivered insert would bring the row back. The tombstone keeps the key and LSN, with PII nulled, and a view hides it from analysts.
-
-**Biggest operational risk?**
-The replication slot. If Debezium stops, Postgres keeps every WAL segment for it and can fill its disk, taking the payments DB down. Airflow checks slot lag every run and fails above 512 MB. I measured the WAL held during a 60-second outage.
-
-**What happens when someone adds a column in Postgres?**
-Bronze can't break: it stores raw JSON. Silver detects the unknown key and logs it to `ops.schema_drift_events` without failing. To adopt the column, I add it to the contract and replay from bronze. I chose detect-and-decide over silent auto-evolution so contract changes are visible.
-
-**Why Databricks and not Snowflake?**
-Free forever versus a 30-day trial, so the project keeps working. Delta gives ACID MERGE, which CDC needs. Tradeoff: serverless only, daily quota, and the warehouse can't reach my laptop's Kafka, which is why I bridge with Parquet files.
-
-**Why are the files micro-batched instead of streamed?**
-Databricks Free Edition runs in the cloud and can't reach a laptop Kafka, and serverless only supports `availableNow` triggers. In production with MSK or Confluent, Databricks would read the topic directly with Structured Streaming and latency would drop from minutes to seconds.
-
-**How does the SCD2 work, and why rebuild it?**
-From CDC history: every merchant change has an exact commit time, so `valid_from` is the change time and `valid_to` is the next change (window `LEAD`). No-op updates are collapsed. I rebuild it every run because it's small and a rebuild is automatically correct with late events; incremental SCD2 MERGE is where most SCD2 bugs live.
-
-**How do you reconcile without false alarms when CDC lags?**
-Daily mode only compares facts that never change after insert (count, sum of cents per created day) for closed days. Lag can't affect a closed day. Full mode compares everything, including status counts and deletes, after quiescing.
-
-**How would you scale this 100x?**
-More partitions and consumer instances (key ordering still holds); Databricks reading Kafka directly; Avro + Schema Registry; incremental gold by affected date partitions instead of full rebuilds; liquid clustering on hot keys; multi-broker Kafka with replication factor 3.
-
-**What about GDPR deletes?**
-Silver hashes emails and tombstones carry no PII, but raw emails still exist in bronze JSON and in hashed form in history. True erasure would need bronze retention plus VACUUM, or crypto-shredding (per-customer encryption keys that get deleted). It's listed as a limitation.
-
----
-
-## 11. Honest limitations
-
-Put these in the README. Interviewers trust a project more when it states its limits.
+## 8. Honest limitations
 
 - **Synthetic data.** Business insights (chargeback rates, top merchants) are fictional. The engineering is real.
 - **Single-node everything.** One Kafka broker (replication factor 1), one Airflow container. Numbers are laptop numbers.
 - **Micro-batch freshness.** End-to-end freshness is bounded by the 30-minute schedule because of Free Edition constraints.
 - **No FX.** Settlement is reported per currency.
-- **PII.** Raw emails remain in bronze JSON. See the GDPR answer above.
+- **PII.** Raw emails remain in bronze JSON. True erasure needs bronze retention plus VACUUM, or crypto-shredding (per-customer keys that get deleted).
 - **DQ flags are never resolved.** A record fixed later in the source stays flagged.
 - **Not tested in CI against Databricks.** Transform logic is covered by local Spark tests; Delta MERGE behavior is only exercised in the workspace.
 - **Airflow 2.10.** Airflow 3 is the current line; the DAGs use the TaskFlow API and should port with minor import changes.
 
 ---
 
-## 12. Timeline
-
-| Week | Phases | Output |
-|---|---|---|
-| 1 | 0, 1 | Capture path working, `make verify` all OK |
-| 2 | 2, 3 | Bronze/silver/gold in Databricks, transform tests green |
-| 3 | 4, 5 | DQ + reconciliation, Airflow running every 30 min |
-| 4 | 6, 7 | Tableau dashboards published, CI green |
-| 5 | 8 | Chaos + benchmark results table, README, resume bullets filled |
-
-Leave the simulator and pipeline running for several days before measuring metrics 1, 2 and 9. Volume and reconciled days come from elapsed time.
-
----
-
-## 13. All design decisions in one table
+## 9. All design decisions in one table
 
 | # | Decision | Chosen | Because | Gave up |
 |---|---|---|---|---|
@@ -604,8 +498,8 @@ Create each file at the path shown. Every file is complete. Comments explain the
 #
 # WHY DOCKER COMPOSE:
 #   One command spins up the whole stack, anyone can reproduce it, and it costs $0.
-#   Tradeoff: single node only, no high availability. That's fine for a portfolio
-#   project; in production these would be managed services (RDS, MSK/Confluent).
+#   Tradeoff: single node only, no high availability. That's fine for a local
+#   demo; in production these would be managed services (RDS, MSK/Confluent).
 # =============================================================================
 
 services:
@@ -765,7 +659,7 @@ services:
   # WHY METADATA IN THE SAME POSTGRES SERVER (separate `airflow` database):
   #   saves another ~300 MB container. Production would use its own instance
   #   so orchestrator load can never touch the payments database.
-  # WHY _PIP_ADDITIONAL_REQUIREMENTS: zero build step for a portfolio project.
+  # WHY _PIP_ADDITIONAL_REQUIREMENTS: zero build step for a local demo.
   #   Tradeoff: slower first start. Production bakes a custom image.
   # ---------------------------------------------------------------------------
   airflow:
@@ -1195,8 +1089,8 @@ CONFIG = {
     #   + human-readable in Kafka UI, no Schema Registry container to run
     #   - bigger messages; no enforced schema contract between producer and
     #     consumer (Avro + Schema Registry gives you that)
-    # For a single-team portfolio project, readability wins. Mention in
-    # interviews that production would likely use Avro/Protobuf + a registry.
+    # With a single consuming team, readability wins. With several teams,
+    # production would use Avro/Protobuf + a registry.
     "key.converter": "org.apache.kafka.connect.json.JsonConverter",
     "key.converter.schemas.enable": "false",
     "value.converter": "org.apache.kafka.connect.json.JsonConverter",
@@ -1302,7 +1196,7 @@ WHY A LIVE SIMULATOR instead of loading a static dataset (PaySim, Kaggle):
 WHY GROUND-TRUTH LOGGING of injected bad records:
     Every bad row we inject is written to simulator/injected/bad_records.jsonl.
     Later we join that against what the quality checks flagged, which gives a
-    real "caught X% of bad records" number for the resume, instead of a guess.
+    real "caught X% of bad records" measurement instead of a guess.
 """
 
 from __future__ import annotations
@@ -1656,7 +1550,7 @@ KEY DESIGN DECISIONS
      + works with free tools, and files are easy to inspect and replay
      - latency is "seconds to minutes", not sub-second true streaming
    In production with a cloud Kafka (MSK/Confluent), Databricks would read the
-   topic directly with Structured Streaming. Say this in interviews.
+   topic directly with Structured Streaming.
 
 2. DELIVERY GUARANTEE: AT-LEAST-ONCE, then dedupe downstream.
    Order of operations on every flush:
@@ -1933,7 +1827,7 @@ Answers three questions:
   2. Any duplicate events? (expected: 0 in normal runs; >0 only after a crash,
      which is fine because silver dedupes on the Kafka offset)
   3. How fast? Latency = time we wrote the file minus time Postgres committed
-     the change. This is your first resume number.
+     the change. This is the headline capture-latency number.
 
 WHY DUCKDB: it queries a folder of Parquet files with plain SQL, in-process, no
 server, free. Same SQL you'd write in Databricks later.

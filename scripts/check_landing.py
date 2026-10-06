@@ -8,7 +8,7 @@ Answers four questions:
   2. Any duplicate events? (expected: 0 in normal runs; >0 only after a crash,
      which is fine because silver dedupes on the Kafka offset)
   3. How fast? Latency = time we wrote the file minus time Postgres committed
-     the change. This is your first resume number.
+     the change. This is the headline capture-latency number.
   4. Are files a healthy size, and did anything land in the dead-letter file?
 
 WHY DUCKDB: it queries a folder of Parquet files with plain SQL, in-process, no

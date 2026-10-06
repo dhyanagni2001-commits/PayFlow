@@ -5,8 +5,8 @@
 #
 # WHY DOCKER COMPOSE:
 #   One command spins up the whole stack, anyone can reproduce it, and it costs $0.
-#   Tradeoff: single node only, no high availability. That's fine for a portfolio
-#   project; in production these would be managed services (RDS, MSK/Confluent).
+#   Tradeoff: single node only, no high availability. That's fine for a local
+#   demo; in production these would be managed services (RDS, MSK/Confluent).
 # =============================================================================
 
 services:
@@ -166,7 +166,7 @@ services:
   # WHY METADATA IN THE SAME POSTGRES SERVER (separate `airflow` database):
   #   saves another ~300 MB container. Production would use its own instance
   #   so orchestrator load can never touch the payments database.
-  # WHY _PIP_ADDITIONAL_REQUIREMENTS: zero build step for a portfolio project.
+  # WHY _PIP_ADDITIONAL_REQUIREMENTS: zero build step for a local demo.
   #   Tradeoff: slower first start. Production bakes a custom image.
   # EDGE CASE: apache-airflow==2.10.5 is pinned in the list on purpose. Without
   #   it, pip resolves the newest Databricks provider, which requires Airflow 3,

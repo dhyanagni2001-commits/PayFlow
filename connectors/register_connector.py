@@ -81,8 +81,8 @@ CONFIG = {
     #   + human-readable in Kafka UI, no Schema Registry container to run
     #   - bigger messages; no enforced schema contract between producer and
     #     consumer (Avro + Schema Registry gives you that)
-    # For a single-team portfolio project, readability wins. Mention in
-    # interviews that production would likely use Avro/Protobuf + a registry.
+    # With a single consuming team, readability wins. With several teams,
+    # production would use Avro/Protobuf + a registry.
     "key.converter": "org.apache.kafka.connect.json.JsonConverter",
     "key.converter.schemas.enable": "false",
     "value.converter": "org.apache.kafka.connect.json.JsonConverter",

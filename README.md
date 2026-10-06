@@ -8,7 +8,7 @@ shipped to a data lakehouse, cleaned, checked, and turned into the numbers finan
 **Stack:** PostgreSQL 16 · Debezium 2.7 · Apache Kafka 3.9 (KRaft) · Python 3.11 · Parquet · DuckDB ·
 Databricks (Delta Lake, Auto Loader, Unity Catalog) · PySpark · Apache Airflow 2.10 · Tableau · Docker · GitHub Actions
 
-The long-form design document (every decision, the tradeoffs, interview prep) is
+The long-form design document (every decision and its tradeoffs, plus the full source) is
 [`PayFlow_CDC_Project.md`](PayFlow_CDC_Project.md). This README is the story version.
 
 ---

@@ -19,7 +19,7 @@ WHY A LIVE SIMULATOR instead of loading a static dataset (PaySim, Kaggle):
 WHY GROUND-TRUTH LOGGING of injected bad records:
     Every bad row we inject is written to simulator/injected/bad_records.jsonl.
     Later we join that against what the quality checks flagged, which gives a
-    real "caught X% of bad records" number for the resume, instead of a guess.
+    real "caught X% of bad records" measurement instead of a guess.
 
 Edge cases handled:
     1. Concurrent simulators (the benchmark runs several). Every state change is
