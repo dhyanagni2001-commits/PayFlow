@@ -360,7 +360,7 @@ databricks/deploy.py             uploads notebooks, creates/updates the job
 databricks/notebooks/            transforms.py (all logic, unit tested) + 00_setup ... 04_gold
 reconciliation/reconcile.py      Postgres vs silver, to the cent (daily and full)
 airflow/dags/                    payflow_lakehouse (every 30 min) + daily reconciliation, maintenance, replay
-scripts/                         check_landing · verify_no_loss · benchmark_throughput · local_lakehouse · chaos/
+scripts/                         check_landing · verify_no_loss · benchmark_throughput · local_lakehouse · export_for_tableau · chaos/
 tests/                           consumer · pipeline logic · Spark transforms · DAG integrity
 .github/workflows/ci.yml         unit, DAG, and end-to-end CDC tests
 chaos_logs/                      output of every chaos run

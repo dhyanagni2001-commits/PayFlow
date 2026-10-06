@@ -14,6 +14,7 @@ landing_archive/
 simulator/injected/
 chaos_logs/
 local_lakehouse/
+tableau/data/
 
 # Secrets
 .env

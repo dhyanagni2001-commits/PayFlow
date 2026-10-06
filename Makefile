@@ -4,7 +4,7 @@
 #   8 test     9 local-lakehouse  10 deploy  11 upload  12 airflow-up  13 reconcile
 #  14 chaos   15 bench            16 down    17 reset
 .PHONY: install up register simulate consume check verify test test-transforms local-lakehouse \
-        deploy upload airflow-up reconcile chaos bench down reset env-check
+        deploy upload airflow-up reconcile tableau-export chaos bench down reset env-check
 
 PYTHON ?= python3
 # Java 17 for local Spark (Homebrew keg-only path on macOS; ignored if absent).
@@ -56,6 +56,9 @@ airflow-up:       ## 12. start Airflow (http://localhost:8080, password in conta
 
 reconcile: env-check ## 13. quiesced full reconciliation (stop simulator, wait for a pipeline run)
 	set -a && . ./.env && set +a && .venv/bin/python reconciliation/reconcile.py --mode full
+
+tableau-export: env-check ## 13b. gold + ops tables -> tableau/data/*.csv for Tableau Public
+	set -a && . ./.env && set +a && .venv/bin/python scripts/export_for_tableau.py
 
 chaos:            ## 14. all chaos scenarios
 	for s in kill_consumer crash_before_commit stop_connect schema_drift; do scripts/chaos/run_chaos.sh $$s || exit 1; done
