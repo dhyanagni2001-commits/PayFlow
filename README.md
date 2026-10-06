@@ -280,21 +280,4 @@ Needs the Databricks gold tables from [§4](#4-todo-running-the-databricks-half)
 
 > Tableau Public: _link here_
 
-## 9. TODO: CI on GitHub
 
-`.github/workflows/ci.yml` runs three jobs: `unit` (ruff + unit + Spark tests), `dags` (DAG integrity on Airflow 2.10.5),
-and `e2e`. The `e2e` job runs real Postgres + Kafka + Debezium with 60 s of traffic, `verify_no_loss.py`, then
-`local_lakehouse.py` (0 duplicates, identical replay, reconciliation 0 mismatches).
-
-- [ ] `git init && git add . && git commit -m "PayFlow CDC lakehouse"` (`.gitignore` already excludes `.env`, `.venv`, landing data and logs).
-- [ ] Create a GitHub repo and push.
-- [ ] Wait for all three jobs to go green, then add the badge to the top of this README:
-  `![ci](https://github.com/<you>/<repo>/actions/workflows/ci.yml/badge.svg)`
-
-## 10. Final checklist before the resume
-
-- [ ] §4 steps 1–7 done; metrics 5, 9, 11 and the Databricks replay added to the Results table
-- [ ] Simulator + pipeline left running a few days (volume and reconciled-day counts grow with time)
-- [ ] Tableau link + screenshots in §8
-- [ ] CI badge green
-- [ ] Resume bullets (design doc §9) filled with **measured** values only
