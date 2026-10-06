@@ -1,0 +1,79 @@
+# =============================================================================
+# CI: three jobs, cheapest first.
+#   unit  - lint + unit tests + Spark transform tests      (~2 min)
+#   dags  - Airflow DAG integrity against real Airflow     (~3 min)
+#   e2e   - real Postgres + Kafka + Debezium, 60s of traffic, prove zero loss,
+#           then silver/quality/gold on local Spark + reconcile to the cent
+#
+# WHY AN E2E JOB: unit tests can't catch a wrong Debezium setting or a broken
+# publication. Spinning up the real capture path on every push and checking
+# "every Postgres row arrived with its latest state" catches exactly that.
+# Databricks isn't called from CI (would need secrets and burn free quota);
+# transforms are covered by the local Spark tests instead.
+# =============================================================================
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - uses: actions/setup-java@v4          # local Spark for transform tests
+        with: { distribution: temurin, java-version: "17" }
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: ruff check .
+      - run: pytest tests/test_consumer.py tests/test_pipeline_logic.py tests/test_transforms.py -v
+
+  dags:
+    runs-on: ubuntu-latest
+    env:
+      AIRFLOW_HOME: /tmp/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      PYTHONPATH: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      # Constraints file = the exact dependency set Airflow 2.10.5 was tested with.
+      - run: >
+          pip install "apache-airflow==2.10.5" apache-airflow-providers-databricks "psycopg[binary]" pytest
+          --constraint https://raw.githubusercontent.com/apache/airflow/constraints-2.10.5/constraints-3.11.txt
+      - run: airflow db migrate
+      - run: pytest tests/test_dags.py -v
+
+  e2e:
+    needs: unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - uses: actions/setup-java@v4          # local Spark for scripts/local_lakehouse.py
+        with: { distribution: temurin, java-version: "17" }
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Start capture stack (no Airflow / UI needed)
+        run: |
+          cp .env.example .env
+          docker compose up -d --wait postgres kafka connect
+      - run: python connectors/register_connector.py
+      - name: Traffic + consumer, then prove zero loss
+        run: |
+          python consumer/consumer.py --flush-seconds 5 > consumer.log 2>&1 &
+          CONSUMER=$!
+          python simulator/simulator.py --rate 50 --duration 60 --seed 1
+          sleep 25                                   # let Debezium + consumer drain
+          kill -INT $CONSUMER; wait $CONSUMER || true
+          python scripts/verify_no_loss.py
+          python scripts/check_landing.py
+      - name: Lakehouse logic on the captured data (0 dup, replay identical, reconcile 0 mismatches)
+        run: python scripts/local_lakehouse.py
+      - if: failure()
+        run: |
+          cat consumer.log || true
+          docker compose logs connect | tail -100

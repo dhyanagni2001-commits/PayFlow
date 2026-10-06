@@ -1,0 +1,4 @@
+# Test/lint only
+pytest>=8.0
+ruff>=0.6
+pyspark==3.5.3   # local tests of databricks/notebooks/transforms.py (needs Java 17+)

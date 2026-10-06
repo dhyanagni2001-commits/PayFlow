@@ -1,0 +1,211 @@
+# =============================================================================
+# PayFlow CDC - local infrastructure (Phase 1)
+#
+# Postgres (source OLTP) -> Debezium (Kafka Connect) -> Kafka -> Python consumer
+#
+# WHY DOCKER COMPOSE:
+#   One command spins up the whole stack, anyone can reproduce it, and it costs $0.
+#   Tradeoff: single node only, no high availability. That's fine for a portfolio
+#   project; in production these would be managed services (RDS, MSK/Confluent).
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # SOURCE DATABASE: the "production" payments DB we capture changes from.
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16
+    container_name: payflow-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-payflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-payflow}
+      POSTGRES_DB: ${POSTGRES_DB:-payflow}
+    # wal_level=logical is REQUIRED for CDC. It makes Postgres write enough detail
+    # into the write-ahead log (WAL) for Debezium to rebuild every row change.
+    # Tradeoff: slightly more WAL volume and disk I/O than the default "replica".
+    # max_replication_slots / max_wal_senders: room for Debezium plus spares.
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_replication_slots=4"
+      - "-c"
+      - "max_wal_senders=4"
+    ports:
+      - "5432:5432"
+    volumes:
+      # Scripts here run once, on first start, in alphabetical order.
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-payflow} -d ${POSTGRES_DB:-payflow}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # ---------------------------------------------------------------------------
+  # KAFKA: durable, ordered log of change events.
+  #
+  # WHY KRAFT MODE (no ZooKeeper): KRaft is where Kafka is going (4.x removed
+  # ZooKeeper entirely), and it's one less container eating RAM.
+  # WHY NOT REDPANDA: Redpanda is lighter, but plain Apache Kafka is what most job
+  # descriptions list. Swap to Redpanda if your laptop struggles; Debezium works
+  # with either.
+  # ---------------------------------------------------------------------------
+  kafka:
+    image: apache/kafka:3.9.1
+    container_name: payflow-kafka
+    ports:
+      - "29092:29092"   # for clients on your laptop (simulator/consumer)
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      # Two listeners: one for containers (kafka:9092), one for your laptop
+      # (localhost:29092). Without this split, clients on the host get told to
+      # connect to "kafka:9092", which doesn't resolve outside Docker.
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_HOST://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # Single broker, so every replication factor must be 1.
+      # Tradeoff: losing this container loses data. Production uses 3.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      # 3 partitions per topic so we can later show parallel consumers.
+      # Debezium keys each message by the row's primary key, so all changes to
+      # one payment always land in the same partition = per-payment ordering.
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Keep 7 days of events so we can replay/backfill after a bug.
+      KAFKA_LOG_RETENTION_HOURS: 168
+    # No volume on purpose: Kafka data lives inside the container and survives
+    # `docker compose stop/start`, but is wiped by `docker compose down`.
+    # Tradeoff: simpler (no file-permission issues with the non-root Kafka image)
+    # at the cost of losing events on `down`. The source of truth is Postgres, so
+    # Debezium can always re-snapshot.
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+
+  # ---------------------------------------------------------------------------
+  # DEBEZIUM (runs inside Kafka Connect): reads the Postgres WAL and publishes
+  # one Kafka message per row change (insert/update/delete).
+  #
+  # WHY LOG-BASED CDC instead of polling "WHERE updated_at > last_run":
+  #   + catches DELETEs (polling can't see a row that's gone)
+  #   + catches every intermediate state, not just the latest one
+  #   + no extra load from repeated full-table queries
+  #   - more moving parts, and a stuck replication slot can fill the source disk
+  #     (we guard against that with heartbeats + monitoring later)
+  # ---------------------------------------------------------------------------
+  connect:
+    image: quay.io/debezium/connect:2.7
+    container_name: payflow-connect
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8083:8083"   # Kafka Connect REST API (register/inspect connectors)
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: payflow-connect
+      # Connect stores its own config, source offsets (= last WAL position read)
+      # and status in Kafka topics. This is what lets Debezium resume exactly
+      # where it stopped after a restart.
+      CONFIG_STORAGE_TOPIC: _connect_configs
+      OFFSET_STORAGE_TOPIC: _connect_offsets
+      STATUS_STORAGE_TOPIC: _connect_statuses
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8083/connectors >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  # ---------------------------------------------------------------------------
+  # KAFKA UI: browse topics and messages at http://localhost:8085
+  # Pure convenience for debugging. Not part of the pipeline.
+  # (Port 8085 because Airflow will take 8080 in Phase 3.)
+  # ---------------------------------------------------------------------------
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: payflow-kafka-ui
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8085:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: payflow
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: debezium
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://connect:8083
+
+  # ---------------------------------------------------------------------------
+  # AIRFLOW (Phase 5): orchestrates upload -> Databricks job -> checks,
+  # daily reconciliation, maintenance, and replays.
+  #
+  # WHY `standalone` (one container: scheduler + webserver + triggerer):
+  #   The official compose file runs 6+ containers (~4 GB RAM). On top of
+  #   Kafka + Debezium + Postgres, that doesn't fit a laptop. Standalone with
+  #   LocalExecutor keeps real parallelism in one container.
+  #   Tradeoff: no HA, not how production runs. Fine because Airflow here only
+  #   *coordinates*; the heavy work runs in Databricks.
+  # WHY METADATA IN THE SAME POSTGRES SERVER (separate `airflow` database):
+  #   saves another ~300 MB container. Production would use its own instance
+  #   so orchestrator load can never touch the payments database.
+  # WHY _PIP_ADDITIONAL_REQUIREMENTS: zero build step for a portfolio project.
+  #   Tradeoff: slower first start. Production bakes a custom image.
+  # EDGE CASE: apache-airflow==2.10.5 is pinned in the list on purpose. Without
+  #   it, pip resolves the newest Databricks provider, which requires Airflow 3,
+  #   and silently UNINSTALLS Airflow 2.10.5 -> container dies with
+  #   "airflow: not found". The pin makes pip choose a compatible provider.
+  # ---------------------------------------------------------------------------
+  airflow:
+    image: apache/airflow:2.10.5-python3.11
+    container_name: payflow-airflow
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: standalone
+    user: "${AIRFLOW_UID:-50000}:0"      # Linux: set AIRFLOW_UID=$(id -u) in .env
+    ports:
+      - "8080:8080"
+    env_file:
+      - path: .env
+        required: false     # Phase 1 runs without a .env
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+      _PIP_ADDITIONAL_REQUIREMENTS: >-
+        apache-airflow==2.10.5
+        apache-airflow-providers-databricks>=6.5
+        databricks-sdk databricks-sql-connector psycopg[binary]>=3.2 pytest
+      # Airflow connection used by DatabricksRunNowOperator, built from .env.
+      AIRFLOW_CONN_DATABRICKS_DEFAULT: '{"conn_type": "databricks", "host": "${DATABRICKS_HOST:-}", "password": "${DATABRICKS_TOKEN:-}"}'
+      # Inside Docker, Postgres is reached by service name, not localhost.
+      PG_DSN: postgresql://payflow:payflow@postgres:5432/payflow
+      PYTHONPATH: /opt/payflow
+      LANDING_DIR: /opt/payflow/landing
+      ARCHIVE_DIR: /opt/payflow/landing_archive
+      GROUND_TRUTH: /opt/payflow/simulator/injected/bad_records.jsonl
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./:/opt/payflow                  # uploader, reconciliation, landing files
+
+volumes:
+  pg_data:

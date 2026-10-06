@@ -1,0 +1,8 @@
+# Runtime dependencies (laptop + Airflow container)
+psycopg[binary]>=3.2         # Postgres driver: simulator, reconciliation, slot-lag check
+faker>=30.0                  # fake names/emails for the simulator
+confluent-kafka>=2.5         # Kafka consumer (librdkafka: faster/more reliable than kafka-python)
+pyarrow>=17.0                # Parquet writer
+duckdb>=1.1                  # local SQL over Parquet: checks, loss verification
+databricks-sdk>=0.40         # Volume uploads, notebook/job deployment
+databricks-sql-connector>=3.4  # SQL warehouse queries: reconciliation, freshness, maintenance
