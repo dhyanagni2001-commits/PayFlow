@@ -19,3 +19,4 @@ tableau/data/
 # Secrets
 .env
 NEXT_STEPS.md
+logs/
