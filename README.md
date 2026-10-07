@@ -159,7 +159,7 @@ turns "we think it works" into "we can prove it works."
 
 ### 11. Airflow runs it all on a schedule
 
-Airflow (`airflow/dags/`) is the conductor. Every 30 minutes, `payflow_lakehouse` checks the replication slot isn't
+Airflow (`airflow/dags/`) is the conductor. Every hour, `payflow_lakehouse` checks the replication slot isn't
 falling behind, uploads new files, runs the Databricks job, and checks the data is fresh. Separately,
 `payflow_daily_reconciliation` reconciles every night, `payflow_maintenance` compacts small files weekly, and
 `payflow_replay` rebuilds everything from bronze on demand.
@@ -333,8 +333,8 @@ None of these were in the original plan. Each one showed up while actually runni
 - **The data is synthetic.** Chargeback rates and top merchants are made up. The engineering is real.
 - **Everything is single-node.** One Kafka broker with no replication, one Airflow container. Throughput numbers are laptop
   numbers, and 3,293 events/s is a floor set by the load generator, not the pipeline's limit.
-- **Freshness is micro-batch.** Data reaches gold within about 30 minutes (the Airflow schedule), chosen to fit Free
-  Edition. The capture side is seconds.
+- **Freshness is micro-batch.** Data reaches gold within about an hour (the Airflow schedule), chosen to fit Free
+  Edition's daily compute quota: at every 30 minutes the quota ran out overnight. The capture side is seconds.
 - **Snapshot timestamps are approximate.** Rows that existed before Debezium started carry the snapshot time.
 - **No currency conversion.** Settlement is reported per currency.
 - **Personal data still exists in bronze.** Emails are hashed from silver onward, but the raw JSON in bronze still has
@@ -359,7 +359,7 @@ payflow_common/connections.py    Postgres and Databricks SQL helpers
 databricks/deploy.py             uploads notebooks, creates/updates the job
 databricks/notebooks/            transforms.py (all logic, unit tested) + 00_setup ... 04_gold
 reconciliation/reconcile.py      Postgres vs silver, to the cent (daily and full)
-airflow/dags/                    payflow_lakehouse (every 30 min) + daily reconciliation, maintenance, replay
+airflow/dags/                    payflow_lakehouse (hourly) + daily reconciliation, maintenance, replay
 scripts/                         check_landing · verify_no_loss · benchmark_throughput · local_lakehouse · export_for_tableau · chaos/
 tests/                           consumer · pipeline logic · Spark transforms · DAG integrity
 .github/workflows/ci.yml         unit, DAG, and end-to-end CDC tests

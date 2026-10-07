@@ -43,7 +43,7 @@ These are the targets. The measured values are in the README's results table.
 |---|---|---|
 | Completeness | 0 lost changes, including under failures | `verify_no_loss.py` after every chaos test |
 | Duplicates | 0 duplicate rows in silver, even after a crash | Event-id dedupe + count check |
-| Freshness | Source commit → silver in under ~35 min (bounded by the 30-min schedule) | `ops.pipeline_runs` p50/p95 |
+| Freshness | Source commit → silver in about an hour (bounded by the hourly schedule) | `ops.pipeline_runs` p50/p95 |
 | Correctness | Daily reconciliation matches to the cent | `ops.reconciliation_runs` |
 | Data quality | Catch ≥ 95% of injected bad records with 0 false positives | `ops.dq_catch_rate_history` |
 | History | Point-in-time merchant fees (SCD Type 2) | `gold.dim_merchant_scd2` + tests |
@@ -169,7 +169,7 @@ payflow-cdc/
 │       ├── 00_setup.py  01_bronze.py  02_silver.py  03_quality.py  04_gold.py
 ├── reconciliation/reconcile.py      Postgres vs silver, to the cent
 ├── airflow/dags/
-│   ├── payflow_lakehouse.py         every 30 min: slot check → upload → job → freshness
+│   ├── payflow_lakehouse.py         hourly: slot check → upload → job → freshness
 │   └── payflow_ops.py               daily reconciliation, weekly maintenance, replay
 ├── scripts/
 │   ├── check_landing.py             counts, duplicates, latency, file sizes
@@ -320,11 +320,11 @@ make airflow-up
 docker logs payflow-airflow 2>&1 | grep -i password    # admin password for http://localhost:8080
 ```
 
-Unpause `payflow_lakehouse`, keep the simulator and consumer running, and watch runs every 30 minutes.
+Unpause `payflow_lakehouse`, keep the simulator and consumer running, and watch runs every hour.
 
 | DAG | Schedule | Tasks |
 |---|---|---|
-| `payflow_lakehouse` | every 30 min | `check_replication_slot` → `upload_landing_files` (short-circuits if nothing new) → `run_databricks_job` → `check_freshness` |
+| `payflow_lakehouse` | hourly | `check_replication_slot` → `upload_landing_files` (short-circuits if nothing new) → `run_databricks_job` → `check_freshness` |
 | `payflow_daily_reconciliation` | 00:37 UTC | `reconcile_closed_days` (fails on any cent mismatch) |
 | `payflow_maintenance` | Sunday 03:13 UTC | `optimize_and_vacuum` (records file counts before/after) |
 | `payflow_replay` | manual | full refresh of silver/gold from bronze |
@@ -334,7 +334,7 @@ Unpause `payflow_lakehouse`, keep the simulator and consumer running, and watch 
 | Decision | Why | Cost |
 |---|---|---|
 | Airflow coordinates, Databricks computes | Heavy work in Airflow workers starves the scheduler | Two systems to monitor |
-| 30-minute schedule | Free Edition has a daily compute quota; each run starts serverless compute | Freshness is ~30 min, not seconds. Measure the freshness vs. quota curve |
+| Hourly schedule | Free Edition has a daily compute quota; each run starts serverless compute | Freshness is ~1 h, not seconds. At 30 min the quota ran out overnight (measured) |
 | Short-circuit when no files | No data, no compute spend | None |
 | Slot-lag check every run | If Debezium stops, Postgres keeps all WAL and can fill its disk. #1 operational risk of log-based CDC | One cheap query |
 | `standalone` Airflow, metadata DB on the same Postgres server | RAM: the official compose is 6+ containers | No HA; orchestrator shares a server with the source DB (separate database) |
@@ -431,7 +431,7 @@ FROM payflow.gold.daily_merchant_settlement GROUP BY currency;
 
 - **Synthetic data.** Business insights (chargeback rates, top merchants) are fictional. The engineering is real.
 - **Single-node everything.** One Kafka broker (replication factor 1), one Airflow container. Numbers are laptop numbers.
-- **Micro-batch freshness.** End-to-end freshness is bounded by the 30-minute schedule because of Free Edition constraints.
+- **Micro-batch freshness.** End-to-end freshness is bounded by the hourly schedule because of Free Edition's daily compute quota.
 - **No FX.** Settlement is reported per currency.
 - **PII.** Raw emails remain in bronze JSON. True erasure needs bronze retention plus VACUUM, or crypto-shredding (per-customer keys that get deleted).
 - **DQ flags are never resolved.** A record fixed later in the source stays flagged.
@@ -475,7 +475,7 @@ FROM payflow.gold.daily_merchant_settlement GROUP BY currency;
 | 29 | Bad data | Flag + exclude from finance | Availability + clean numbers | Flags never auto-resolve |
 | 30 | Reconciliation | Grouped counts/sums, closed days | Cheap, no false alarms | Exactly-cancelling errors |
 | 31 | Orchestrator | Airflow coordinates only | Scheduler stays healthy | Two systems |
-| 32 | Schedule | 30 min + short-circuit | Fits free quota | ~30 min freshness |
+| 32 | Schedule | Hourly + short-circuit | Fits free quota (30 min exhausted it overnight) | ~1 h freshness |
 | 33 | Airflow deploy | Standalone, shared PG server | Fits laptop RAM | No HA |
 | 34 | BI | Tableau extracts → Public | Free, shareable | No live refresh, public data |
 | 35 | Testing | Unit + local Spark + DAG + real e2e CDC in CI | Each layer's bugs caught where they live | Databricks not in CI |
@@ -3199,7 +3199,7 @@ if __name__ == "__main__":
 
 ```python
 """
-Main pipeline DAG, every 30 minutes:
+Main pipeline DAG, every hour:
 
   check_replication_slot -> upload_landing_files -> [skip if nothing new]
       -> run_databricks_job -> check_freshness
@@ -3209,11 +3209,14 @@ WHY AIRFLOW ORCHESTRATES BUT DOESN'T PROCESS:
     Heavy processing inside Airflow workers is a classic anti-pattern: the
     scheduler gets starved and retries become expensive.
 
-WHY EVERY 30 MIN (not every 1 min):
+WHY HOURLY (not every 1 min, and not every 30 min):
     Each run spins up serverless compute, and Free Edition has a daily compute
-    quota. 30 min keeps freshness under ~35 min while staying inside the quota.
-    The tradeoff is explicit and tunable: lower the schedule and measure the
-    freshness/quota curve (that's a good README chart).
+    quota. Measured: at every 30 min (48 runs/day, ~7-8 min each) the quota ran
+    out around 06:00 UTC and Databricks refused new runs ("Triggering new runs
+    ... is currently disabled temporarily") until ~12:00 UTC. Nothing was lost
+    (files kept uploading, the next allowed run caught up), but freshness had a
+    6-hour hole. Hourly halves the compute and keeps p95 freshness around an
+    hour. With a paid workspace, drop this to minutes or stream from Kafka.
 
 WHY SHORT-CIRCUIT when nothing was uploaded:
     No new files = nothing to process. Skipping the Databricks run saves quota.
@@ -3241,7 +3244,7 @@ default_args = {
 
 @dag(
     dag_id="payflow_lakehouse",
-    schedule="*/30 * * * *",
+    schedule="0 * * * *",       # hourly: see "WHY HOURLY" above
     start_date=datetime(2026, 10, 1),
     catchup=False,            # don't backfill missed intervals: the data is in Kafka/landing anyway
     max_active_runs=1,        # never two uploads/jobs at once (silver watermark relies on order)
@@ -3329,7 +3332,7 @@ CATALOG = os.getenv("PAYFLOW_CATALOG", "payflow")
 
 # -----------------------------------------------------------------------------
 # Daily reconciliation
-# WHY 00:37 and not 00:00: the day just closed; give the 30-min pipeline one
+# WHY 00:37 and not 00:00: the day just closed; give the hourly pipeline one
 # run to catch up on the last events of the day. Odd minute = not competing
 # with every other job scheduled at :00.
 # -----------------------------------------------------------------------------

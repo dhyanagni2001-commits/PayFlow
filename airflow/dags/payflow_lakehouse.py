@@ -1,5 +1,5 @@
 """
-Main pipeline DAG, every 30 minutes:
+Main pipeline DAG, every hour:
 
   1. check_replication_slot -> 2. upload_landing_files -> [skip if nothing new]
       -> 3. run_databricks_job -> 4. check_freshness (runs even when 3 is skipped)
@@ -9,11 +9,14 @@ WHY AIRFLOW ORCHESTRATES BUT DOESN'T PROCESS:
     Heavy processing inside Airflow workers is a classic anti-pattern: the
     scheduler gets starved and retries become expensive.
 
-WHY EVERY 30 MIN (not every 1 min):
+WHY HOURLY (not every 1 min, and not every 30 min):
     Each run spins up serverless compute, and Free Edition has a daily compute
-    quota. 30 min keeps freshness under ~35 min while staying inside the quota.
-    The tradeoff is explicit and tunable: lower the schedule and measure the
-    freshness/quota curve (that's a good README chart).
+    quota. Measured: at every 30 min (48 runs/day, ~7-8 min each) the quota ran
+    out around 06:00 UTC and Databricks refused new runs ("Triggering new runs
+    ... is currently disabled temporarily") until ~12:00 UTC. Nothing was lost
+    (files kept uploading, the next allowed run caught up), but freshness had a
+    6-hour hole. Hourly halves the compute and keeps p95 freshness around an
+    hour. With a paid workspace, drop this to minutes or stream from Kafka.
 
 WHY SHORT-CIRCUIT when nothing was uploaded:
     No new files = nothing to process. Skipping the Databricks run saves quota.
@@ -66,7 +69,7 @@ def freshness_lag_seconds(source_max: datetime | None, silver_max: datetime | No
 
 @dag(
     dag_id="payflow_lakehouse",
-    schedule="*/30 * * * *",
+    schedule="0 * * * *",       # hourly: see "WHY HOURLY" above
     start_date=datetime(2026, 10, 1),
     catchup=False,            # don't backfill missed intervals: the data is in Kafka/landing anyway
     max_active_runs=1,        # never two uploads/jobs at once (silver watermark relies on order)

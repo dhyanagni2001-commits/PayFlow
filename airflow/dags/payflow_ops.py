@@ -30,7 +30,7 @@ CATALOG = os.getenv("PAYFLOW_CATALOG") or "payflow"
 
 # -----------------------------------------------------------------------------
 # 1. Daily reconciliation
-# WHY 00:37 and not 00:00: the day just closed; give the 30-min pipeline one
+# WHY 00:37 and not 00:00: the day just closed; give the hourly pipeline one
 # run to catch up on the last events of the day. Odd minute = not competing
 # with every other job scheduled at :00.
 # -----------------------------------------------------------------------------
