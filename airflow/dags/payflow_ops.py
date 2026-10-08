@@ -1,7 +1,7 @@
 """
 Operational DAGs:
 
-  payflow_daily_reconciliation  00:37 UTC daily. Source vs lakehouse, to the cent.
+  payflow_daily_reconciliation  01:37 UTC daily. Source vs lakehouse, to the cent.
   payflow_maintenance           weekly. OPTIMIZE + VACUUM, records file counts.
   payflow_replay                manual. Rebuild silver/gold from bronze.
 
@@ -30,11 +30,15 @@ CATALOG = os.getenv("PAYFLOW_CATALOG") or "payflow"
 
 # -----------------------------------------------------------------------------
 # 1. Daily reconciliation
-# WHY 00:37 and not 00:00: the day just closed; give the hourly pipeline one
-# run to catch up on the last events of the day. Odd minute = not competing
-# with every other job scheduled at :00.
+# WHY 01:37 and not 00:00: the day just closed, and its last events need one
+# full pipeline run that STARTS after midnight plus the consumer's flush
+# interval. The 00:00 run starts at exactly midnight, before the consumer has
+# flushed the day's final ~30 s, so those rows only reach silver in the 01:00
+# run. Measured: reconciling at 00:37 with the hourly schedule reported the last
+# 30 s of the day as missing (everything up to 23:59:30 matched to the cent).
+# Odd minute = not competing with every other job scheduled at :00.
 # -----------------------------------------------------------------------------
-@dag(dag_id="payflow_daily_reconciliation", schedule="37 0 * * *", start_date=datetime(2026, 10, 1),
+@dag(dag_id="payflow_daily_reconciliation", schedule="37 1 * * *", start_date=datetime(2026, 10, 1),
      catchup=False, default_args=default_args, tags=["payflow", "quality"])
 def payflow_daily_reconciliation():
 

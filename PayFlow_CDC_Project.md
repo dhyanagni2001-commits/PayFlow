@@ -92,7 +92,7 @@ flowchart LR
 5. Airflow uploads the file to a Databricks Volume and triggers the job. Auto Loader appends it to `bronze.cdc_events` exactly once.
 6. Silver dedupes on the Kafka event id, appends both events to `silver.payments_history`, and MERGEs only the newest (by LSN) into `silver.payments_state`.
 7. Quality rules run. Gold rebuilds: #42 gets `authorized_at`, `captured_at`, and a fee computed from the merchant's fee **at capture time** (SCD2).
-8. Tableau shows it in the daily settlement. At 00:37 UTC, Airflow checks that yesterday's count and sum in silver equal Postgres to the cent.
+8. Tableau shows it in the daily settlement. At 01:37 UTC, Airflow checks that yesterday's count and sum in silver equal Postgres to the cent.
 
 ---
 
@@ -304,7 +304,7 @@ Flagged records stay in silver (risk wants to see them) and are **excluded from 
 
 Reconciliation has two modes, because CDC always trails the source a little:
 
-- **daily** (Airflow, 00:37 UTC): count and sum of cents per created day for payments, refunds, disputes, **closed days only**. Those facts never change after insert, so an exact match is expected even while traffic flows.
+- **daily** (Airflow, 01:37 UTC): count and sum of cents per created day for payments, refunds, disputes, **closed days only**. Those facts never change after insert, so an exact match is expected even while traffic flows.
 - **full** (after chaos tests, simulator stopped): rows and cents per status for every table, plus customer count (proves deletes arrived).
 
 **Done when:** `ops.dq_catch_rate_history` shows your catch rate and false positives, and `make reconcile` exits 0 after stopping the simulator and letting one pipeline run finish.
@@ -325,7 +325,7 @@ Unpause `payflow_lakehouse`, keep the simulator and consumer running, and watch 
 | DAG | Schedule | Tasks |
 |---|---|---|
 | `payflow_lakehouse` | hourly | `check_replication_slot` → `upload_landing_files` (short-circuits if nothing new) → `run_databricks_job` → `check_freshness` |
-| `payflow_daily_reconciliation` | 00:37 UTC | `reconcile_closed_days` (fails on any cent mismatch) |
+| `payflow_daily_reconciliation` | 01:37 UTC | `reconcile_closed_days` (fails on any cent mismatch) |
 | `payflow_maintenance` | Sunday 03:13 UTC | `optimize_and_vacuum` (records file counts before/after) |
 | `payflow_replay` | manual | full refresh of silver/gold from bronze |
 
@@ -3311,7 +3311,7 @@ payflow_lakehouse()
 """
 Operational DAGs:
 
-  payflow_daily_reconciliation  00:37 UTC daily. Source vs lakehouse, to the cent.
+  payflow_daily_reconciliation  01:37 UTC daily. Source vs lakehouse, to the cent.
   payflow_maintenance           weekly. OPTIMIZE + VACUUM, records file counts.
   payflow_replay                manual. Rebuild silver/gold from bronze.
 
@@ -3332,11 +3332,15 @@ CATALOG = os.getenv("PAYFLOW_CATALOG", "payflow")
 
 # -----------------------------------------------------------------------------
 # Daily reconciliation
-# WHY 00:37 and not 00:00: the day just closed; give the hourly pipeline one
-# run to catch up on the last events of the day. Odd minute = not competing
-# with every other job scheduled at :00.
+# WHY 01:37 and not 00:00: the day just closed, and its last events need one
+# full pipeline run that STARTS after midnight plus the consumer's flush
+# interval. The 00:00 run starts at exactly midnight, before the consumer has
+# flushed the day's final ~30 s, so those rows only reach silver in the 01:00
+# run. Measured: reconciling at 00:37 with the hourly schedule reported the last
+# 30 s of the day as missing (everything up to 23:59:30 matched to the cent).
+# Odd minute = not competing with every other job scheduled at :00.
 # -----------------------------------------------------------------------------
-@dag(dag_id="payflow_daily_reconciliation", schedule="37 0 * * *", start_date=datetime(2026, 10, 1),
+@dag(dag_id="payflow_daily_reconciliation", schedule="37 1 * * *", start_date=datetime(2026, 10, 1),
      catchup=False, default_args=default_args, tags=["payflow", "quality"])
 def payflow_daily_reconciliation():
 
