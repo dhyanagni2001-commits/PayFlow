@@ -7,8 +7,12 @@
         deploy upload airflow-up reconcile tableau-export tableau-workbook chaos bench down reset env-check
 
 PYTHON ?= python3
-# Java 17 for local Spark (Homebrew keg-only path on macOS; ignored if absent).
-JAVA_HOME ?= $(shell /usr/libexec/java_home -v 17 2>/dev/null || ls -d /opt/homebrew/opt/openjdk@17 2>/dev/null)
+# Java 17 for local Spark (Homebrew keg-only path on macOS). Spark breaks on newer Java, so an installed 17 wins
+# over a JAVA_HOME already set in the shell; if no 17 is found (e.g. CI, which sets its own), JAVA_HOME is left alone.
+JAVA17 := $(shell /usr/libexec/java_home -v 17 2>/dev/null || ls -d /opt/homebrew/opt/openjdk@17 2>/dev/null)
+ifneq ($(JAVA17),)
+JAVA_HOME := $(JAVA17)
+endif
 export JAVA_HOME
 
 install:          ## 1. venv + all Python deps (needs Python 3.11+)
