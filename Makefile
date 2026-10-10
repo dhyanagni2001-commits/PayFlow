@@ -64,8 +64,8 @@ reconcile: env-check ## 13. quiesced full reconciliation (stop simulator, wait f
 tableau-export: env-check ## 13b. gold + ops tables -> tableau/data/*.csv for Tableau Public
 	set -a && . ./.env && set +a && .venv/bin/python scripts/export_for_tableau.py
 
-tableau-workbook: ## 13c. tableau/data/*.csv -> tableau/PayFlow.twb (open in Tableau Public)
-	$(PYTHON) tableau/build_workbook.py
+tableau-workbook: ## 13c. tableau/data/*.csv -> tableau/PayFlow.twbx (open in Tableau Public)
+	.venv/bin/python tableau/build_workbook.py
 
 chaos:            ## 14. all chaos scenarios
 	for s in kill_consumer crash_before_commit stop_connect schema_drift; do scripts/chaos/run_chaos.sh $$s || exit 1; done

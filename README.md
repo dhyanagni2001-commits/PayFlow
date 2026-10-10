@@ -8,6 +8,8 @@ shipped to a data lakehouse, cleaned, checked, and turned into the numbers finan
 **Stack:** PostgreSQL 16 · Debezium 2.7 · Apache Kafka 3.9 (KRaft) · Python 3.11 · Parquet · DuckDB ·
 Databricks (Delta Lake, Auto Loader, Unity Catalog) · PySpark · Apache Airflow 2.10 · Tableau · Docker · GitHub Actions
 
+**Live dashboards:** [Tableau Public](https://public.tableau.com/app/profile/dhyan.agni/viz/PayFlow/Finance)
+
 The long-form design document (every decision and its tradeoffs, plus the full source) is
 [`PayFlow_CDC_Project.md`](PayFlow_CDC_Project.md). This README is the story version.
 
@@ -171,8 +173,8 @@ falling behind, uploads new files, runs the Databricks job, and checks the data 
 ### 12. Tableau shows it to humans
 
 `make tableau-export` pulls the gold and ops tables out of Databricks into `tableau/data/*.csv` (Tableau Public reads
-files, not Databricks). `make tableau-workbook` then generates `tableau/PayFlow.twb`, a workbook with three dashboards
-built from those files:
+files, not Databricks). `make tableau-workbook` then loads each file into a Tableau extract (`.hyper`, which Tableau Public requires) and
+packages them with three dashboards into `tableau/PayFlow.twbx`:
 
 - **Finance:** settlement totals, gross split into fees, refunds, chargebacks and net, the top 10 merchants, and
   captured vs refunded every 10 minutes. One currency dropdown drives every chart, so currencies are never added together.
@@ -181,6 +183,13 @@ built from those files:
 - **Pipeline health:** latency and events per Airflow run, the data-quality catch rate, and every reconciliation run.
 
 The workbook is generated as code rather than clicked together, so it can be rebuilt after every export.
+
+**Live dashboards:** [PayFlow on Tableau Public](https://public.tableau.com/app/profile/dhyan.agni/viz/PayFlow/Finance)
+(final data from the four-day run).
+
+![Finance dashboard](docs/finance.png)
+![Risk dashboard](docs/risk.png)
+![Pipeline health dashboard](docs/pipeline_health.png)
 
 ---
 
@@ -336,12 +345,11 @@ When you're done, `make down` stops the containers but keeps the data; `make res
 
 ```bash
 make tableau-export     # gold + ops tables -> tableau/data/*.csv
-make tableau-workbook   # -> tableau/PayFlow.twb
+make tableau-workbook   # -> tableau/PayFlow.twbx (workbook + .hyper extracts in one file)
 ```
 
-Open `tableau/PayFlow.twb` in [Tableau Public](https://public.tableau.com) (free). To publish, Tableau Public needs
-each data source as an extract: right-click each source in the Data pane, **Extract Data… → Extract**, then
-**File → Save to Tableau Public As…**.
+Open `tableau/PayFlow.twbx` in [Tableau Public](https://public.tableau.com) (free), then
+**File → Save to Tableau Public As…** to publish.
 
 ---
 
@@ -405,7 +413,7 @@ databricks/notebooks/            transforms.py (all logic, unit tested) + 00_set
 reconciliation/reconcile.py      Postgres vs silver, to the cent (daily and full)
 airflow/dags/                    payflow_lakehouse (hourly) + daily reconciliation, maintenance, replay
 scripts/                         check_landing · verify_no_loss · benchmark_throughput · local_lakehouse · export_for_tableau · chaos/
-tableau/build_workbook.py        generates the Tableau workbook (3 dashboards) from the exported CSVs
+tableau/build_workbook.py        CSVs -> .hyper extracts + 3 dashboards, packaged as PayFlow.twbx
 tests/                           consumer · pipeline logic · Spark transforms · DAG integrity
 .github/workflows/ci.yml         unit, DAG, and end-to-end CDC tests
 chaos_logs/                      output of every chaos run

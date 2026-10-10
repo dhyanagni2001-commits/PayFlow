@@ -20,4 +20,4 @@ tableau/data/
 .env
 NEXT_STEPS.md
 logs/
-tableau/PayFlow.twb
+tableau/PayFlow.twb*

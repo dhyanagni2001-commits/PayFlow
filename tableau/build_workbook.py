@@ -1,14 +1,30 @@
-"""Generate tableau/PayFlow.twb: three dashboards (Finance, Risk, Pipeline health) over tableau/data/*.csv.
+"""Generate tableau/PayFlow.twbx: three dashboards (Finance, Risk, Pipeline health) over tableau/data/*.csv.
 
-Run `make tableau-export` first, then `python tableau/build_workbook.py`, then open the .twb in Tableau Public.
+Tableau Public only opens workbooks whose data is extracted, so each CSV is first loaded into a .hyper extract
+(Tableau's own file format, via tableauhyperapi), and the workbook plus extracts are zipped into one packaged .twbx.
+
+Run `make tableau-export` first, then `make tableau-workbook`, then open the .twbx in Tableau Public.
 """
 
+import tempfile
+import zipfile
 from pathlib import Path
 from xml.sax.saxutils import quoteattr
 
+from tableauhyperapi import (
+    Connection,
+    CreateMode,
+    HyperProcess,
+    SqlType,
+    TableDefinition,
+    TableName,
+    Telemetry,
+    escape_string_literal,
+)
+
 HERE = Path(__file__).resolve().parent
 DATA_DIR = HERE / "data"
-OUT = HERE / "PayFlow.twb"
+OUT = HERE / "PayFlow.twbx"
 
 MONEY = 'c"$"#,##0;-"$"#,##0'
 PCT = "p0.0%"
@@ -98,14 +114,33 @@ SOURCES = {
 
 # Calculated fields: source -> (name, caption, datatype, role, type, formula, uses_param)
 CALCS = {
+    # Merchant names repeat (several different "Smith Ltd"), so charts label merchants as "name #id".
     "settlement": [
-        ("[Currency Match]", "Currency Match", "boolean", "dimension", "nominal", f"[currency] = {CCY_PARAM}", True)
+        ("[Currency Match]", "Currency Match", "boolean", "dimension", "nominal", f"[currency] = {CCY_PARAM}", True),
+        (
+            "[Merchant]",
+            "Merchant",
+            "string",
+            "dimension",
+            "nominal",
+            '[merchant_name] + " #" + STR([merchant_id])',
+            False,
+        ),
     ],
     "volume_10min": [
         ("[Currency Match]", "Currency Match", "boolean", "dimension", "nominal", f"[currency] = {CCY_PARAM}", True)
     ],
     "merchant_risk": [
-        ("[Above 1pct]", "Above 1% Chargebacks", "boolean", "dimension", "nominal", "[chargeback_rate] >= 0.01", False)
+        ("[Above 1pct]", "Above 1% Chargebacks", "boolean", "dimension", "nominal", "[chargeback_rate] >= 0.01", False),
+        (
+            "[Merchant]",
+            "Merchant",
+            "string",
+            "dimension",
+            "nominal",
+            '[merchant_name] + " #" + STR([merchant_id])',
+            False,
+        ),
     ],
     "dq_flags": [("[Number of Records]", "Number of Records", "integer", "measure", "quantitative", "1", False)],
 }
@@ -128,6 +163,8 @@ def col_def(src, name):
     for n, dt, role, fmt in SOURCES[src]:
         if n == name:
             typ = "quantitative" if role == "measure" else ("ordinal" if dt in ("date", "datetime") else "nominal")
+            if fmt is None and dt == "integer" and role == "measure":
+                fmt = "n#,##0"  # counts: 16, not 16.00
             f = f" default-format={a(fmt)}" if fmt else ""
             return f"<column caption={a(caption(n))} datatype={a(dt)}{f} name={a('[' + n + ']')} role={a(role)} type={a(typ)} />"
     for n, cap, dt, role, typ, formula, _ in CALCS.get(src, []):
@@ -141,16 +178,10 @@ def col_def(src, name):
 
 def datasource(src):
     cols = SOURCES[src]
-    rel_cols = "".join(
-        f"<column datatype={a(dt)} name={a(n)} ordinal={a(i)} />" for i, (n, dt, _, _) in enumerate(cols)
-    )
-    rel = (
-        f"<relation connection='textscan.payflow_{src}' name='{src}.csv' table='[{src}#csv]' type='table'>"
-        f"<columns character-set='UTF-8' header='yes' locale='en_US' separator=','>{rel_cols}</columns></relation>"
-    )
+    rel = f"<relation connection='hyper.payflow_{src}' name='Extract' table='[Extract].[Extract]' type='table' />"
     meta = "".join(
         f"<metadata-record class='column'><remote-name>{n}</remote-name><remote-type>{REMOTE_TYPE[dt]}</remote-type>"
-        f"<local-name>[{n}]</local-name><parent-name>[{src}.csv]</parent-name><remote-alias>{n}</remote-alias>"
+        f"<local-name>[{n}]</local-name><parent-name>[Extract]</parent-name><remote-alias>{n}</remote-alias>"
         f"<ordinal>{i}</ordinal><local-type>{dt}</local-type>"
         f"<aggregation>{'Sum' if dt in ('integer', 'real') else ('Year' if dt in ('date', 'datetime') else 'Count')}</aggregation>"
         f"<contains-null>true</contains-null></metadata-record>"
@@ -164,8 +195,9 @@ def datasource(src):
     return (
         f"<datasource caption={a(src)} inline='true' name={a(ds_name(src))} version='18.1'>"
         f"<connection class='federated'><named-connections>"
-        f"<named-connection caption={a(src)} name='textscan.payflow_{src}'>"
-        f"<connection class='textscan' directory={a(DATA_DIR)} filename='{src}.csv' password='' server='' />"
+        f"<named-connection caption={a(src)} name='hyper.payflow_{src}'>"
+        f"<connection authentication='auth-none' author-locale='en_US' class='hyper' dbname='Data/{src}.hyper' "
+        f"default-settings='yes' port='' sslmode='' username='tableau_internal_user' />"
         f"</named-connection></named-connections>{rel}<metadata-records>{meta}</metadata-records></connection>"
         f"<aliases enabled='yes' />{fields}"
         f"<layout dim-ordering='alphabetic' dim-percentage='0.5' measure-percentage='0.4' measure-ordering='alphabetic' show-structure='true' />"
@@ -231,9 +263,10 @@ class Sheet:
     def currency(self, context=False):
         self.keep(self.f("Currency Match"), "true", context)
 
-    def at_least(self, ref, lo):
+    def at_least(self, ref, lo, hi=None):
+        top = f"<max>{hi}</max>" if hi is not None else ""
         self.filters.append(
-            f"<filter class='quantitative' column={a(ref)} included-values='in-range'><min>{lo}</min></filter>"
+            f"<filter class='quantitative' column={a(ref)} included-values='in-range'><min>{lo}</min>{top}</filter>"
         )
         self.slices.append(ref)
 
@@ -291,21 +324,28 @@ def worksheets():
     out.append(s.xml(rows=s.mv, cols=s.mn, mark="Bar", encodings=f"<color column={a(s.mn)} />"))
 
     s = Sheet("Top 10 merchants by net", "settlement")
-    name, net = s.f("merchant_name"), s.f("net", "Sum", "qk")
+    name, net = s.f("Merchant"), s.f("net", "Sum", "qk")
     s.currency(context=True)
     s.top(name, 10, "SUM([net])")
     s.sort_desc(name, net)
     out.append(s.xml(rows=name, cols=net, mark="Bar", encodings=f"<color column={a(s.f('category'))} />"))
 
-    s = Sheet("Activity over time", "volume_10min", "Captured vs refunded, every 10 minutes")
+    s = Sheet("Activity over time", "volume_10min", "Captured vs refunded, every 10 minutes (UTC), four-day run")
     t = s.f("time_10min", kind="qk")
+    # Before 13:00 UTC on Oct 6 is the earlier test burst (initial load + throughput benchmark), not steady traffic.
+    s.at_least(t, "#2026-10-06 13:00:00#", "#2100-01-01 00:00:00#")
     s.measure_names([s.f("captured", "Sum", "qk"), s.f("refunded", "Sum", "qk")])
     s.currency()
     out.append(s.xml(rows=s.mv, cols=t, mark="Line", encodings=f"<color column={a(s.mn)} />"))
 
     # ---- Risk (merchant_risk, dq_flags) ----
-    s = Sheet("Volume vs chargeback rate", "merchant_risk", "Volume vs chargeback rate (one dot per merchant)")
+    s = Sheet(
+        "Volume vs chargeback rate",
+        "merchant_risk",
+        "Volume vs chargeback rate (merchants with 20+ payments in 30 days)",
+    )
     x, y = s.f("captured_30d", "Sum", "qk"), s.f("chargeback_rate", "Avg", "qk")
+    s.at_least(x, 20)  # 1 chargeback out of 2 payments is a 50% rate but says nothing
     enc = (
         f"<color column={a(s.f('current_risk_tier'))} /><lod column={a(s.f('merchant_id'))} />"
         f"<lod column={a(s.f('merchant_name'))} />"
@@ -318,7 +358,7 @@ def worksheets():
     out.append(s.xml(rows=rule, cols=cnt, mark="Bar", encodings=f"<color column={a(s.f('table_name'))} />"))
 
     s = Sheet("Largest merchants above 1%", "merchant_risk", "Largest merchants above 1% chargebacks")
-    name, tier = s.f("merchant_name"), s.f("current_risk_tier")
+    name, tier = s.f("Merchant"), s.f("current_risk_tier")
     vol = s.f("captured_30d", "Sum", "qk")
     s.measure_names([s.f("chargeback_rate", "Avg", "qk"), vol, s.f("disputes_lost_30d", "Sum", "qk")])
     s.keep(s.f("Above 1pct"), "true", context=True)
@@ -400,7 +440,7 @@ def dashboard(name, title, rows, param=False):
     return (
         f"<dashboard name={a(name)}>"
         f"<layout-options><title><formatted-text><run fontsize='18'>{title}</run></formatted-text></title></layout-options>"
-        f"<style /><size maxheight='900' maxwidth='1400' minheight='900' minwidth='1400' />{param_xml}"
+        f"<style /><size maxheight='850' maxwidth='1200' minheight='850' minwidth='1200' />{param_xml}"
         f"<zones><zone h='100000' id='1' type-v2='layout-basic' w='100000' x='0' y='0'>{''.join(zones)}</zone></zones>"
         f"</dashboard>"
     )
@@ -455,6 +495,33 @@ def windows():
     return "".join(out)
 
 
+HYPER_TYPE = {
+    "string": SqlType.text(),
+    "integer": SqlType.big_int(),
+    "real": SqlType.double(),
+    "date": SqlType.date(),
+    "datetime": SqlType.timestamp(),
+}
+
+
+def build_extracts(out_dir):
+    """CSV -> .hyper, one file per source, each holding the table "Extract"."Extract" as Tableau expects."""
+    # Hyper writes hyperd.log into the working directory by default; keep it in the temp dir with the extracts.
+    log_dir = {"log_dir": str(out_dir.parent)}
+    with HyperProcess(Telemetry.DO_NOT_SEND_USAGE_DATA_TO_TABLEAU, parameters=log_dir) as hyper:
+        for src, cols in SOURCES.items():
+            table = TableDefinition(
+                TableName("Extract", "Extract"),
+                [TableDefinition.Column(n, HYPER_TYPE[dt]) for n, dt, _, _ in cols],
+            )
+            with Connection(hyper.endpoint, out_dir / f"{src}.hyper", CreateMode.CREATE_AND_REPLACE) as conn:
+                conn.catalog.create_schema("Extract")
+                conn.catalog.create_table(table)
+                csv_path = escape_string_literal(str(DATA_DIR / f"{src}.csv"))
+                rows = conn.execute_command(f"COPY {table.table_name} FROM {csv_path} WITH (format csv, header)")
+            print(f"  {src}.hyper: {rows:,} rows")
+
+
 def build():
     for src in SOURCES:
         if not (DATA_DIR / f"{src}.csv").exists():
@@ -470,7 +537,15 @@ def build():
         f"<dashboards>{''.join(dashboard(*d) for d in DASHBOARDS)}</dashboards>"
         f"<windows>{windows()}</windows></workbook>\n"
     )
-    OUT.write_text(xml, encoding="utf-8")
+    with tempfile.TemporaryDirectory() as tmp:
+        data = Path(tmp) / "Data"
+        data.mkdir()
+        build_extracts(data)
+        (Path(tmp) / "PayFlow.twb").write_text(xml, encoding="utf-8")
+        with zipfile.ZipFile(OUT, "w", zipfile.ZIP_DEFLATED) as z:
+            z.write(Path(tmp) / "PayFlow.twb", "PayFlow.twb")
+            for f in sorted(data.iterdir()):
+                z.write(f, f"Data/{f.name}")
     print(f"wrote {OUT}")
 
 
