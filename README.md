@@ -19,6 +19,10 @@ The pipeline works end to end. Data flows from a local Postgres database, throug
 and the finished tables there match the source database exactly: **$12,863,124.83 of payments, 0 mismatches**. It has
 been deliberately broken twelve different ways without losing a single row.
 
+It then ran unattended for four days (Oct 6–9, 2026): **6.5 million change events, 1.48 million captured payments,
+101 scheduled Airflow runs**, nightly reconciliation every night, and a final full reconciliation of **16 checks,
+0 mismatches, $176.8M compared** after a clean stop.
+
 ---
 
 ## The problem, in plain words
@@ -166,8 +170,17 @@ falling behind, uploads new files, runs the Databricks job, and checks the data 
 
 ### 12. Tableau shows it to humans
 
-The gold and ops tables are shaped for three Tableau dashboards: one for finance (settlement and take rate), one for
-risk (chargebacks and flagged records), and one for pipeline health (freshness, reconciliation, quality).
+`make tableau-export` pulls the gold and ops tables out of Databricks into `tableau/data/*.csv` (Tableau Public reads
+files, not Databricks). `make tableau-workbook` then generates `tableau/PayFlow.twb`, a workbook with three dashboards
+built from those files:
+
+- **Finance:** settlement totals, gross split into fees, refunds, chargebacks and net, the top 10 merchants, and
+  captured vs refunded every 10 minutes. One currency dropdown drives every chart, so currencies are never added together.
+- **Risk:** chargeback rate against volume for every merchant, flagged records by quality rule, and the largest
+  merchants above a 1% chargeback rate.
+- **Pipeline health:** latency and events per Airflow run, the data-quality catch rate, and every reconciliation run.
+
+The workbook is generated as code rather than clicked together, so it can be rebuilt after every export.
 
 ---
 
@@ -193,6 +206,26 @@ broker, and a Databricks Free Edition workspace. These are real measurements, no
 | Local and cloud agree | Databricks settlement totals (EUR, GBP, USD) **identical to the cent** to the local Spark run | `local_lakehouse/results.json` vs gold |
 | First Databricks job run | **~4.5 minutes** for all 463K events (setup 51 s, bronze 38 s, silver 112 s, quality 27 s, gold 34 s) | job `payflow-lakehouse` |
 | Tests | **39 automated tests** | `make test` |
+
+### Four-day continuous run
+
+Simulator, consumer and Airflow ran unattended from 2026-10-06 to 2026-10-09 (PDT), then stopped cleanly: simulator
+first, one last pipeline run, full reconciliation, consumer last. Numbers from the final export.
+
+| What | Result |
+|---|---|
+| Change events in bronze | **6,503,126** |
+| Captured payments | **1,476,193** across 29,624 merchants: USD $78.37M, EUR €9.75M, GBP £9.76M gross |
+| Airflow pipeline runs | **101** (1 initial backfill + 100 hourly), all landed in gold |
+| Freshness at the end of each run | median **9.6 min**, worst 27.7 min behind the source |
+| Commit → gold latency | median p50 **37 min**, as expected with an hourly schedule |
+| Nightly reconciliation | Oct 6, 7, 8, 9 each reconciled with **0 mismatches** |
+| Final full reconciliation | **16 checks, 0 mismatches, $176.8M compared** |
+| Data quality | **58,398 / 58,398** injected bad records caught, **0 false positives** |
+
+One nightly run on Oct 8 reported 3 mismatches. It had started at 00:37 UTC, before the last seconds of the previous
+day had reached Databricks. Rerunning it later gave 0, and the schedule moved to 01:37 UTC. It shows up as such in the
+Pipeline health dashboard rather than being hidden.
 
 ---
 
@@ -299,6 +332,17 @@ make bench          # throughput test; needs `make consume` running in another t
 
 When you're done, `make down` stops the containers but keeps the data; `make reset` wipes everything local.
 
+### Part four: the dashboards
+
+```bash
+make tableau-export     # gold + ops tables -> tableau/data/*.csv
+make tableau-workbook   # -> tableau/PayFlow.twb
+```
+
+Open `tableau/PayFlow.twb` in [Tableau Public](https://public.tableau.com) (free). To publish, Tableau Public needs
+each data source as an extract: right-click each source in the Data pane, **Extract Data… → Extract**, then
+**File → Save to Tableau Public As…**.
+
 ---
 
 ## Problems found and fixed along the way
@@ -361,6 +405,7 @@ databricks/notebooks/            transforms.py (all logic, unit tested) + 00_set
 reconciliation/reconcile.py      Postgres vs silver, to the cent (daily and full)
 airflow/dags/                    payflow_lakehouse (hourly) + daily reconciliation, maintenance, replay
 scripts/                         check_landing · verify_no_loss · benchmark_throughput · local_lakehouse · export_for_tableau · chaos/
+tableau/build_workbook.py        generates the Tableau workbook (3 dashboards) from the exported CSVs
 tests/                           consumer · pipeline logic · Spark transforms · DAG integrity
 .github/workflows/ci.yml         unit, DAG, and end-to-end CDC tests
 chaos_logs/                      output of every chaos run
